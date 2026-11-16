@@ -3,7 +3,7 @@
 // input objects, enums, lists) and an executor over the same store as REST.
 // Unknown fields answer HTTP 200 with an errors array naming the field.
 
-import { type Issue, type Pull, type Repo, type Store } from './store.ts';
+import { FIXED_ISO, type Issue, type Label, type Pull, type Repo, type Store } from './store.ts';
 import { VIEWER_LOGIN } from './scenario.ts';
 
 // ---------------------------------------------------------------- global ids
@@ -409,6 +409,27 @@ class Executor {
       if (repo === undefined || issue === undefined) return null;
       return this.select('Issue', { repo, issue }, selections);
     }
+    if (decoded.kind === 'P') {
+      const parts = parseNumberedKey(decoded.key);
+      if (parts === null) return null;
+      const repo = this.ctx.store.getRepo(parts.owner, parts.name);
+      const pull = repo?.pullsByNumber.get(parts.number);
+      if (repo === undefined || pull === undefined) return null;
+      return this.select('PullRequest', { repo, pull }, selections);
+    }
+    if (decoded.kind === 'C') {
+      const lastColon = decoded.key.lastIndexOf(':');
+      if (lastColon < 0) return null;
+      const commentId = Number(decoded.key.slice(lastColon + 1));
+      if (!Number.isInteger(commentId)) return null;
+      const parts = parseNumberedKey(decoded.key.slice(0, lastColon));
+      if (parts === null) return null;
+      const repo = this.ctx.store.getRepo(parts.owner, parts.name);
+      const issue = repo?.issuesByNumber.get(parts.number);
+      const comment = issue?.comments.find((c) => c.id === commentId);
+      if (repo === undefined || issue === undefined || comment === undefined) return null;
+      return this.select('IssueComment', { id: commentGid(repo, issue, comment.id), body: comment.body }, selections);
+    }
     return null;
   }
 
@@ -467,6 +488,13 @@ class Executor {
             return repo.description;
           case 'url':
             return `https://github.com/${repo.fullName}`;
+          case 'isPrivate':
+            return repo.isPrivate;
+          case 'fork':
+            return false;
+          case 'createdAt':
+          case 'updatedAt':
+            return FIXED_ISO;
           case 'issue': {
             const number = arg<number>(field, 'number', this.variables);
             if (number === undefined) return null;
@@ -510,10 +538,46 @@ class Executor {
             return issue.body;
           case 'url':
             return `https://github.com/${wrapped.repo.fullName}/issues/${issue.number}`;
+          case 'createdAt':
+          case 'updatedAt':
+            return FIXED_ISO;
+          case 'author':
+            return this.select('User', { login: wrapped.repo.owner }, field.selections);
+          case 'labels':
+            return this.select('LabelConnection', { nodes: issue.labels }, field.selections);
+          case 'comments':
+            return this.select('IssueCommentConnection', {
+              nodes: issue.comments.map((comment) => ({ id: commentGid(wrapped.repo, issue, comment.id), body: comment.body })),
+              pageInfo: { hasNextPage: false, endCursor: null },
+            }, field.selections);
+          case 'closed':
+            return issue.state === 'closed';
           case 'repository':
             return this.select('Repository', wrapped.repo, field.selections);
           default:
             return this.unknownField('Issue', field.name);
+        }
+      }
+      case 'LabelConnection': {
+        const conn = value as { nodes: Label[] };
+        if (field.name === 'nodes') return conn.nodes.map((node) => this.select('Label', node, field.selections));
+        return this.unknownField('LabelConnection', field.name);
+      }
+      case 'Label': {
+        const label = value as Label;
+        if (field.name === 'name') return label.name;
+        if (field.name === 'color') return label.color;
+        return this.unknownField('Label', field.name);
+      }
+      case 'IssueCommentConnection': {
+        const conn = value as { nodes: Array<{ id: string; body: string }>; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+        switch (field.name) {
+          case 'nodes':
+            return conn.nodes.map((node) => this.select('IssueComment', node, field.selections));
+          case 'pageInfo':
+            return this.select('PageInfo', conn.pageInfo, field.selections);
+          default:
+            return this.unknownField('IssueCommentConnection', field.name);
         }
       }
       case 'IssueConnection': {
@@ -554,6 +618,16 @@ class Executor {
             return pull.headRef;
           case 'baseRefName':
             return pull.baseRef;
+          case 'headRefOid': {
+            const oid = pull.headSha !== '' ? pull.headSha : wrapped.repo.resolveRef(pull.headRef);
+            return oid ?? null;
+          }
+          case 'baseRefOid': {
+            const oid = pull.baseSha !== '' ? pull.baseSha : wrapped.repo.resolveRef(pull.baseRef);
+            return oid ?? null;
+          }
+          case 'author':
+            return this.select('User', { login: wrapped.repo.owner }, field.selections);
           case 'mergeable':
             return wrapped.repo.pullMergeable(pull);
           case 'mergeCommitSha':

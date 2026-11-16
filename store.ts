@@ -141,6 +141,8 @@ export class Repo {
   /** Resolve a ref name or branch name to a commit oid. */
   resolveRef(ref: string): string | undefined {
     if (ref.startsWith('refs/')) return this.refs.get(ref);
+    // A raw oid that exists in the store resolves to itself (contents ?ref=<sha> etc.).
+    if (isOid(ref) && this.objects.has(ref)) return ref;
     return this.refs.get(`refs/heads/${ref}`) ?? this.refs.get(`refs/tags/${ref}`);
   }
 

@@ -328,7 +328,6 @@ export function readPack(pack: Buffer, lookup?: (oid: string) => GitObject | und
         baseOff = ((baseOff + 1) << 7) | (b & 0x7f);
       }
       const baseOffset = start - baseOff;
-      const data = inflateSync(pack.subarray(off));
       // inflateSync consumes the whole tail; find the true end via the stream length trick:
       // re-inflate with a bounded approach is not available, so use zlib inflate with chunking.
       const resolved = resolveInflate(pack, off);
@@ -341,7 +340,6 @@ export function readPack(pack: Buffer, lookup?: (oid: string) => GitObject | und
       objects.set(oid, obj);
       byOffset.set(start, obj);
       off = resolved.next;
-      void data;
       void size;
     } else if (typeCode === 7) {
       const baseOid = pack.subarray(off, off + 20).toString('hex');
@@ -364,15 +362,28 @@ export function readPack(pack: Buffer, lookup?: (oid: string) => GitObject | und
     }
   }
   // Deferred REF deltas: base may be in this pack or in the caller's store.
-  for (const entry of deferred) {
-    const base = objects.get(entry.baseOid) ?? lookup?.(entry.baseOid);
-    if (base === undefined) throw new Error(`ref-delta base ${entry.baseOid} not found`);
-    deltaCount += 1;
-    const out = applyDelta(base.data, entry.delta);
-    const obj: GitObject = { type: base.type, data: out };
-    const oid = hashObject(obj.type, out);
-    objects.set(oid, obj);
-    byOffset.set(entry.offset, obj);
+  // A deferred base may itself be a later deferred REF-delta, so loop until
+  // no entry resolves; a pass with no progress means a missing base or a cycle.
+  let remaining = deferred;
+  while (remaining.length > 0) {
+    const next: typeof deferred = [];
+    let progress = false;
+    for (const entry of remaining) {
+      const base = objects.get(entry.baseOid) ?? lookup?.(entry.baseOid);
+      if (base === undefined) {
+        next.push(entry);
+        continue;
+      }
+      progress = true;
+      deltaCount += 1;
+      const out = applyDelta(base.data, entry.delta);
+      const obj: GitObject = { type: base.type, data: out };
+      const oid = hashObject(obj.type, out);
+      objects.set(oid, obj);
+      byOffset.set(entry.offset, obj);
+    }
+    if (!progress) throw new Error(`ref-delta base ${next[0]?.baseOid ?? '?'} not found`);
+    remaining = next;
   }
   void entries;
   return { objects, deltaCount };

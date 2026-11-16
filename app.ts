@@ -407,13 +407,14 @@ async function handleRepoRoutes(store: Store, repo: Repo, req: http.IncomingMess
       sendJson(res, 200, list);
       return;
     }
-    if (method === 'GET' && rest.length === 2) {
-      const sha = repo.resolveRef(rest[1] as string);
+    if (method === 'GET' && rest.length >= 2) {
+      const name = rest.slice(1).join('/');
+      const sha = repo.resolveRef(name);
       if (sha === undefined) {
         notFound(res);
         return;
       }
-      sendJson(res, 200, { name: rest[1], commit: { sha }, protected: false });
+      sendJson(res, 200, { name, commit: { sha }, protected: false });
       return;
     }
     notFound(res);
@@ -563,7 +564,18 @@ async function handleRepoRoutes(store: Store, repo: Repo, req: http.IncomingMess
         const direction = (url.searchParams.get('direction') ?? 'desc').toLowerCase();
         let list = repo.issues.filter((issue) => state === 'all' || issue.state === state);
         list = [...list].sort((a, b) => (direction === 'asc' ? a.number - b.number : b.number - a.number));
-        sendBuffer(res, 200, jsonList(list.map((issue) => issueBuffer(repo, issue))), 'application/json');
+        const perPage = Math.max(1, Math.min(100, parseInt(url.searchParams.get('per_page') ?? '30', 10) || 30));
+        const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
+        const slice = list.slice((page - 1) * perPage, page * perPage);
+        const extra: Record<string, string> = {};
+        const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+        if (page < totalPages) {
+          const host = req.headers.host ?? 'localhost';
+          const nextUrl = `http://${host}/api/v3/repos/${repo.fullName}/issues?state=${state}&direction=${direction}&per_page=${perPage}&page=${page + 1}`;
+          const lastUrl = `http://${host}/api/v3/repos/${repo.fullName}/issues?state=${state}&direction=${direction}&per_page=${perPage}&page=${totalPages}`;
+          extra.link = `<${nextUrl}>; rel="next", <${lastUrl}>; rel="last"`;
+        }
+        sendBuffer(res, 200, jsonList(slice.map((issue) => issueBuffer(repo, issue))), 'application/json', extra);
         return;
       }
       if (method === 'POST') {
@@ -617,6 +629,19 @@ async function handleRepoRoutes(store: Store, repo: Repo, req: http.IncomingMess
         if (typeof parsed.value.title === 'string') issue.title = parsed.value.title;
         if (typeof parsed.value.body === 'string') issue.body = parsed.value.body;
         if (parsed.value.state === 'open' || parsed.value.state === 'closed') issue.state = parsed.value.state;
+        if (Array.isArray(parsed.value.labels)) {
+          const labelNames = parsed.value.labels.filter((l): l is string => typeof l === 'string');
+          const labels: Array<{ name: string; color: string }> = [];
+          for (const labelName of labelNames) {
+            const label = repo.labels.get(labelName);
+            if (label === undefined) {
+              sendJson(res, 422, { message: `Label does not exist: ${labelName}` });
+              return;
+            }
+            labels.push(label);
+          }
+          issue.labels = labels;
+        }
         issue.jsonCache = null;
         sendBuffer(res, 200, issueBuffer(repo, issue), 'application/json');
         return;
@@ -663,7 +688,18 @@ async function handleRepoRoutes(store: Store, repo: Repo, req: http.IncomingMess
       if (method === 'GET') {
         const state = (url.searchParams.get('state') ?? 'open').toLowerCase();
         const list = repo.pulls.filter((pull) => state === 'all' || pull.state === state);
-        sendJson(res, 200, list.map((pull) => pullJson(repo, pull)));
+        const perPage = Math.max(1, Math.min(100, parseInt(url.searchParams.get('per_page') ?? '30', 10) || 30));
+        const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
+        const slice = list.slice((page - 1) * perPage, page * perPage);
+        const extra: Record<string, string> = {};
+        const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+        if (page < totalPages) {
+          const host = req.headers.host ?? 'localhost';
+          const nextUrl = `http://${host}/api/v3/repos/${repo.fullName}/pulls?state=${state}&per_page=${perPage}&page=${page + 1}`;
+          const lastUrl = `http://${host}/api/v3/repos/${repo.fullName}/pulls?state=${state}&per_page=${perPage}&page=${totalPages}`;
+          extra.link = `<${nextUrl}>; rel="next", <${lastUrl}>; rel="last"`;
+        }
+        sendJson(res, 200, slice.map((pull) => pullJson(repo, pull)), extra);
         return;
       }
       if (method === 'POST') {

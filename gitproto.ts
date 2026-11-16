@@ -80,7 +80,7 @@ export function advertisementV2(repo: Repo): Buffer {
     'version 2\n',
     `agent=${AGENT}\n`,
     'ls-refs\n',
-    'fetch=shallow filter\n',
+    'fetch=shallow\n',
     'object-format=sha1\n',
     'flush',
   ]);
@@ -211,7 +211,7 @@ export function planFetch(
 
 /** Pack bytes for a fetch, cached per (wants, depth, haves, shallow) key. */
 function fetchPack(repo: Repo, wants: string[], held: string[], shallowOld: string[], depth: number | null, plan: FetchPlan): Buffer {
-  const key = `${wants.join(',')}|${depth ?? ''}|${held.join(',')}|${shallowOld.join(',')}`;
+  const key = `${[...wants].sort().join(',')}|${depth ?? ''}|${[...held].sort().join(',')}|${[...shallowOld].sort().join(',')}`;
   const cached = repo.packCache.get(key);
   if (cached !== undefined) return cached;
   const pack = writePack(plan.objects);
@@ -286,6 +286,13 @@ export function lsRefsV2(repo: Repo, args: string[]): Buffer {
   return encodePktLines(lines);
 }
 
+/** Throw when a wanted oid is absent from the repo, instead of answering an empty pack. */
+function assertWantsPresent(repo: Repo, wants: string[]): void {
+  for (const want of wants) {
+    if (!repo.objects.has(want)) throw new Error(`want ${want} not found`);
+  }
+}
+
 /** upload-pack v2: one ls-refs or fetch command. Throws on a malformed body. */
 export function uploadPackV2(repo: Repo, body: Buffer): Buffer {
   const packets = decodePktLines(body);
@@ -308,6 +315,7 @@ export function uploadPackV2(repo: Repo, body: Buffer): Buffer {
   if (command === 'ls-refs') return lsRefsV2(repo, texts);
   if (command === 'fetch') {
     const req = parseFetchArgs(texts);
+    assertWantsPresent(repo, req.wants);
     const plan = planFetch(repo, req.wants, req.haves, req.shallow, req.depth);
     const pack = fetchPack(repo, req.wants, req.haves, req.shallow, req.depth, plan);
     const parts: Buffer[] = [];
@@ -345,6 +353,7 @@ export function uploadPackV0(repo: Repo, body: Buffer): Buffer {
   void section;
   const req = parseFetchArgs(lines);
   // v0 puts haves after the first flush; parseFetchArgs already collected them.
+  assertWantsPresent(repo, req.wants);
   const plan = planFetch(repo, req.wants, req.haves, req.shallow, req.depth);
   const pack = fetchPack(repo, req.wants, req.haves, req.shallow, req.depth, plan);
   const parts: Buffer[] = [];
@@ -432,7 +441,7 @@ function applyPushCommand(repo: Repo, command: PushCommand): string | null {
   if (command.newOid === ZERO_OID) {
     // Delete.
     if (current === undefined) {
-      if (command.oldOid !== ZERO_OID) return 'non-fast-forward';
+      if (command.oldOid !== ZERO_OID) return 'ref does not exist';
       return null;
     }
     if (command.oldOid !== ZERO_OID && command.oldOid !== current) return 'non-fast-forward';
