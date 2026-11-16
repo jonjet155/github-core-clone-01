@@ -363,6 +363,11 @@ export class Repo {
     return this.diffTrees(baseTree, this.treeOf(pull.headSha));
   }
 
+  /** The current tip of a pull request's base branch (it moves after other merges). */
+  currentBaseSha(pull: Pull): string {
+    return this.refs.get(`refs/heads/${pull.baseRef}`) ?? pull.baseSha;
+  }
+
   /** Is this pull request mergeable (no conflicting file)? */
   pullMergeable(pull: Pull): 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' {
     if (pull.state !== 'open') return 'UNKNOWN';
@@ -372,11 +377,12 @@ export class Repo {
 
   /** The conflicting path of a pull request, or null when it merges cleanly. */
   mergeConflict(pull: Pull): string | null {
-    const base = mergeBase(pull.headSha, pull.baseSha, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
+    const base = mergeBase(pull.headSha, this.currentBaseSha(pull), this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
     const baseTree = base === null ? undefined : this.treeOf(base);
     const baseFlat = baseTree === undefined ? new Map<string, TreeEntry>() : this.flattenTree(baseTree);
     const headFlat = this.treeOf(pull.headSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(pull.headSha) as string);
-    const currentFlat = this.treeOf(pull.baseSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(pull.baseSha) as string);
+    const currentSha = this.currentBaseSha(pull);
+    const currentFlat = this.treeOf(currentSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(currentSha) as string);
     const names = new Set([...baseFlat.keys(), ...headFlat.keys(), ...currentFlat.keys()]);
     for (const name of names) {
       const b = baseFlat.get(name)?.oid;
@@ -394,11 +400,12 @@ export class Repo {
     if (pull.state !== 'open') return { ok: false, status: 405, message: 'Pull request is already closed' };
     const conflict = this.mergeConflict(pull);
     if (conflict !== null) return { ok: false, status: 405, message: `Merge conflict in ${conflict}` };
-    const base = mergeBase(pull.headSha, pull.baseSha, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
+    const currentBase = this.currentBaseSha(pull);
+    const base = mergeBase(pull.headSha, currentBase, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
     const baseTree = base === null ? undefined : this.treeOf(base);
     const baseFlat = baseTree === undefined ? new Map<string, TreeEntry>() : this.flattenTree(baseTree);
     const headFlat = this.treeOf(pull.headSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(pull.headSha) as string);
-    const currentFlat = this.treeOf(pull.baseSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(pull.baseSha) as string);
+    const currentFlat = this.treeOf(currentBase) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(currentBase) as string);
     // Overlay the head's changes onto the base tip's tree.
     const result = new Map<string, { oid: string; mode: string }>();
     for (const [path, entry] of currentFlat) result.set(path, { oid: entry.oid, mode: entry.mode });
@@ -406,17 +413,14 @@ export class Repo {
       if (baseFlat.get(path)?.oid !== entry.oid) result.set(path, { oid: entry.oid, mode: entry.mode });
     }
     for (const path of baseFlat.keys()) {
-      if (!headFlat.has(path) && baseFlat.get(path)?.oid !== currentFlat.get(path)?.oid) {
-        // Deleted on the head side and unchanged on base: keep the base version (it was
-        // already deleted or changed there); only delete when base did not change it.
-      }
+      // Deleted on the head side: drop it only when the base side did not change it.
       if (!headFlat.has(path) && currentFlat.get(path)?.oid === baseFlat.get(path)?.oid) result.delete(path);
     }
     const newTree = this.treeFromFlat(result);
     const message = `Merge pull request #${pull.number} from ${this.owner}/${pull.headRef}\n\n${pull.title}\n`;
     const commitData = buildCommit({
       tree: newTree,
-      parents: [pull.baseSha],
+      parents: [currentBase],
       message,
       author: COMMITTER,
       committer: COMMITTER,

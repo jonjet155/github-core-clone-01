@@ -430,7 +430,8 @@ async function handleRepoRoutes(store: Store, repo: Repo, req: http.IncomingMess
     }
     const list = repo.commitsFrom(shaParam !== null && shaParam !== '' ? shaParam : repo.defaultBranch).map((sha) => {
       const obj = repo.objects.get(sha);
-      const message = obj !== undefined && obj.type === 'commit' ? parseCommit(obj.data).message : '';
+      // The stored message ends with a newline (git convention); the API shows it without.
+      const message = obj !== undefined && obj.type === 'commit' ? parseCommit(obj.data).message.replace(/\n$/, '') : '';
       return {
         sha,
         commit: {

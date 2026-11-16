@@ -163,7 +163,11 @@ export function planFetch(
     }
   }
   // The BFS above already stops at held commits for the commit walk, but trees and
-  // blobs shared with held history must not be re-sent either.
+  // blobs shared with held history must not be re-sent either. A held commit's
+  // history counts as held — except past a shallow boundary: the client holds the
+  // boundary commit and its tree, but never received its parents, so the walk
+  // stops there instead of claiming the parent's tree and blobs are held.
+  const shallowOldSet = new Set(shallowOld);
   const heldClosure = new Set<string>();
   const heldStack: string[] = [...heldSet];
   while (heldStack.length > 0) {
@@ -175,7 +179,9 @@ export function planFetch(
     if (obj.type === 'commit') {
       const view = parseCommit(obj.data);
       heldStack.push(view.tree);
-      for (const parent of view.parents) heldStack.push(parent);
+      if (!shallowOldSet.has(oid)) {
+        for (const parent of view.parents) heldStack.push(parent);
+      }
     } else if (obj.type === 'tree') {
       for (const entry of parseTree(obj.data)) heldStack.push(entry.oid);
     } else if (obj.type === 'tag') {
@@ -360,11 +366,11 @@ export interface PushCommand {
 
 /** Receive-pack v0: apply commands, answer a sideband report-status. */
 export function receivePack(repo: Repo, body: Buffer): Buffer {
-  const packets = decodePktLines(body);
   const commands: PushCommand[] = [];
   let packStart = -1;
   let off = 0;
   // Walk the raw buffer: pkt-lines until the flush, then the pack bytes.
+  // (The pack itself is binary and must never be parsed as pkt-lines.)
   while (off < body.length) {
     if (off + 4 > body.length) throw new Error('truncated pkt-line in push');
     const len = parseInt(body.toString('ascii', off, off + 4), 16);
@@ -385,7 +391,6 @@ export function receivePack(repo: Repo, body: Buffer): Buffer {
     }
     off += len;
   }
-  void packets;
   if (packStart < 0) throw new Error('push body has no command flush');
   const packBytes = body.subarray(packStart);
   let unpackError: string | null = null;
