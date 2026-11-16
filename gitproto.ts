@@ -46,7 +46,7 @@ function peeledOid(repo: Repo, refOid: string): string | null {
 
 /** v0 advertisement body for a service, cached per repo until a ref moves. */
 export function advertisementV0(repo: Repo, service: 'git-upload-pack' | 'git-receive-pack'): Buffer {
-  const cacheKey = `v0-${service}`;
+  const cacheKey = `v0-${service}-${repo.defaultBranch}`;
   const cached = repo.adCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const caps =
@@ -396,7 +396,7 @@ export function receivePack(repo: Repo, body: Buffer): Buffer {
   let unpackError: string | null = null;
   if (packBytes.length > 0) {
     try {
-      const { objects } = readPack(Buffer.from(packBytes), repo.lookup);
+      const { objects } = readPack(packBytes, repo.lookup);
       for (const [oid, obj] of objects) {
         const recomputed = hashObject(obj.type, obj.data);
         if (recomputed !== oid) throw new Error(`pack object ${oid} does not hash to its id`);

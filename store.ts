@@ -292,7 +292,12 @@ export class Repo {
   updateTree(baseTree: string | undefined, segments: string[], blobOid: string): string {
     if (segments.length === 0) return baseTree ?? this.putObject('tree', buildTree([]));
     const [head, ...rest] = segments as [string, ...string[]];
-    const entries: TreeEntry[] = baseTree === undefined ? [] : parseTree(this.objects.get(baseTree)?.data ?? Buffer.alloc(0));
+    let entries: TreeEntry[] = [];
+    if (baseTree !== undefined) {
+      const baseObj = this.objects.get(baseTree);
+      if (baseObj === undefined || baseObj.type !== 'tree') throw new Error(`updateTree: missing base tree ${baseTree}`);
+      entries = parseTree(baseObj.data);
+    }
     const idx = entries.findIndex((e) => e.name === head);
     if (rest.length === 0) {
       const entry: TreeEntry = { mode: '100644', name: head, oid: blobOid };
@@ -358,14 +363,20 @@ export class Repo {
 
   /** Files changed between a pull request's merge-base and its head. */
   pullFiles(pull: Pull): PullFile[] {
-    const base = mergeBase(pull.headSha, pull.baseSha, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
+    const headSha = this.currentHeadSha(pull);
+    const base = mergeBase(headSha, pull.baseSha, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
     const baseTree = base === null ? undefined : this.treeOf(base);
-    return this.diffTrees(baseTree, this.treeOf(pull.headSha));
+    return this.diffTrees(baseTree, this.treeOf(headSha));
   }
 
   /** The current tip of a pull request's base branch (it moves after other merges). */
   currentBaseSha(pull: Pull): string {
     return this.refs.get(`refs/heads/${pull.baseRef}`) ?? pull.baseSha;
+  }
+
+  /** The current tip of a pull request's head branch (it moves after new pushes). */
+  currentHeadSha(pull: Pull): string {
+    return this.refs.get(`refs/heads/${pull.headRef}`) ?? pull.headSha;
   }
 
   /** Is this pull request mergeable (no conflicting file)? */
@@ -377,10 +388,11 @@ export class Repo {
 
   /** The conflicting path of a pull request, or null when it merges cleanly. */
   mergeConflict(pull: Pull): string | null {
-    const base = mergeBase(pull.headSha, this.currentBaseSha(pull), this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
+    const headSha = this.currentHeadSha(pull);
+    const base = mergeBase(headSha, this.currentBaseSha(pull), this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
     const baseTree = base === null ? undefined : this.treeOf(base);
     const baseFlat = baseTree === undefined ? new Map<string, TreeEntry>() : this.flattenTree(baseTree);
-    const headFlat = this.treeOf(pull.headSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(pull.headSha) as string);
+    const headFlat = this.treeOf(headSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(headSha) as string);
     const currentSha = this.currentBaseSha(pull);
     const currentFlat = this.treeOf(currentSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(currentSha) as string);
     const names = new Set([...baseFlat.keys(), ...headFlat.keys(), ...currentFlat.keys()]);
@@ -401,10 +413,11 @@ export class Repo {
     const conflict = this.mergeConflict(pull);
     if (conflict !== null) return { ok: false, status: 405, message: `Merge conflict in ${conflict}` };
     const currentBase = this.currentBaseSha(pull);
-    const base = mergeBase(pull.headSha, currentBase, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
+    const currentHead = this.currentHeadSha(pull);
+    const base = mergeBase(currentHead, currentBase, this.lookup, (oid) => this.commitSeq.get(oid) ?? 0);
     const baseTree = base === null ? undefined : this.treeOf(base);
     const baseFlat = baseTree === undefined ? new Map<string, TreeEntry>() : this.flattenTree(baseTree);
-    const headFlat = this.treeOf(pull.headSha) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(pull.headSha) as string);
+    const headFlat = this.treeOf(currentHead) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(currentHead) as string);
     const currentFlat = this.treeOf(currentBase) === undefined ? new Map<string, TreeEntry>() : this.flattenTree(this.treeOf(currentBase) as string);
     // Overlay the head's changes onto the base tip's tree.
     const result = new Map<string, { oid: string; mode: string }>();
@@ -552,19 +565,22 @@ export class Store {
   }
 
   createPull(repo: Repo, title: string, body: string, head: string, base: string): Pull | null {
-    const headSha = repo.resolveRef(head);
-    const baseSha = repo.resolveRef(base);
+    // Normalize to short branch names: callers may pass `refs/heads/feature`.
+    const headName = head.replace(/^refs\/heads\//, '');
+    const baseName = base.replace(/^refs\/heads\//, '');
+    const headSha = repo.resolveRef(headName);
+    const baseSha = repo.resolveRef(baseName);
     if (headSha === undefined || baseSha === undefined) return null;
     for (const existing of repo.pulls) {
-      if (existing.state === 'open' && existing.headRef === head && existing.baseRef === base) return null;
+      if (existing.state === 'open' && existing.headRef === headName && existing.baseRef === baseName) return null;
     }
     const pull: Pull = {
       number: repo.nextNumber,
       title,
       body,
       state: 'open',
-      headRef: head,
-      baseRef: base,
+      headRef: headName,
+      baseRef: baseName,
       headSha,
       baseSha,
       merged: false,
